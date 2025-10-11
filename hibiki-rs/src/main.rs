@@ -7,6 +7,7 @@ use clap::Parser;
 
 mod audio_io;
 mod gen;
+mod stream;
 
 use candle::Device;
 
@@ -43,6 +44,56 @@ enum Command {
 
         #[arg()]
         audio_output_file: String,
+
+        #[arg(long, default_value_t = 299_792_458)]
+        seed: u64,
+
+        #[arg(long)]
+        cfg_alpha: Option<f64>,
+
+        /// Run on cpu
+        #[arg(long)]
+        cpu: bool,
+    },
+    Stream {
+        /// Input audio file (mutually exclusive with --input-device)
+        #[arg(long, group = "input")]
+        input_file: Option<String>,
+
+        /// Input device name (substring match, case-insensitive)
+        #[arg(long, group = "input")]
+        input_device: Option<String>,
+
+        /// Output device name (substring match, case-insensitive)
+        #[arg(long)]
+        output_device: Option<String>,
+
+        /// Disable speaker output (useful for file-to-file only)
+        #[arg(long)]
+        disable_speaker: bool,
+
+        /// Save generated audio to WAV file
+        #[arg(long)]
+        save_output: Option<String>,
+
+        /// List available audio devices and exit
+        #[arg(long)]
+        list_devices: bool,
+
+        #[arg(long)]
+        lm_model_file: Option<String>,
+
+        #[arg(long)]
+        mimi_model_file: Option<String>,
+
+        #[arg(long)]
+        config: Option<String>,
+
+        #[arg(long)]
+        text_tokenizer: Option<String>,
+
+        #[arg(long, default_value = "kyutai/hibiki-1b-rs-bf16")]
+        hf_repo: String,
 
         #[arg(long, default_value_t = 299_792_458)]
         seed: u64,
@@ -134,6 +185,75 @@ fn main() -> Result<()> {
                 cfg_alpha,
             };
             gen::run(&args, &dev)?
+        }
+        Command::Stream {
+            input_file,
+            input_device,
+            output_device,
+            disable_speaker,
+            save_output,
+            list_devices,
+            lm_model_file,
+            mimi_model_file,
+            config,
+            text_tokenizer,
+            hf_repo,
+            seed,
+            cfg_alpha,
+            cpu,
+        } => {
+            // Initialize logging first
+            tracing_subscriber::fmt::init();
+            
+            // Handle --list-devices
+            if list_devices {
+                return stream::list_devices();
+            }
+            
+            let dev = device(cpu)?;
+            let api = hf_hub::api::sync::Api::new()?;
+            let hf_repo = match hf_repo.as_str() {
+                "1b" => "kyutai/hibiki-1b-rs-bf16".to_string(),
+                "2b" => "kyutai/hibiki-2b-rs-bf16".to_string(),
+                _ => hf_repo,
+            };
+            let repo = api.model(hf_repo);
+            let config = match config {
+                None => repo.get("config.toml")?,
+                Some(f) => std::path::PathBuf::from(f),
+            };
+            tracing::info!("loading the config");
+            let config_str = std::fs::read_to_string(&config)?;
+            let config: gen::Config = toml::from_str(&config_str)?;
+
+            let lm_model_file = match lm_model_file {
+                None => repo.get(&config.moshi_name)?,
+                Some(v) => std::path::PathBuf::from(v),
+            };
+            let mimi_model_file = match mimi_model_file {
+                None => repo.get(&config.mimi_name)?,
+                Some(v) => std::path::PathBuf::from(v),
+            };
+            let text_tokenizer_file = match text_tokenizer {
+                None => repo.get(&config.tokenizer_name)?,
+                Some(v) => std::path::PathBuf::from(v),
+            };
+
+            let stream_config = stream::StreamConfig {
+                input_file: input_file.map(std::path::PathBuf::from),
+                input_device,
+                output_device,
+                disable_speaker,
+                save_output: save_output.map(std::path::PathBuf::from),
+                lm_config: config.model,
+                lm_model_file,
+                mimi_model_file,
+                text_tokenizer: text_tokenizer_file,
+                seed,
+                cfg_alpha,
+            };
+            
+            stream::run(stream_config, &dev)?
         }
     }
     Ok(())

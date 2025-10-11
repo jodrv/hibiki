@@ -15,12 +15,17 @@ candle = { version = "0.8.2", package = "candle-core" }
 candle-nn = "0.8.2"
 candle-transformers = "0.8.2"
 clap = { version = "4.2.4", features = ["derive"] }
+cpal = "0.15"
+ctrlc = "3.4"
 hf-hub = "0.4.1"
+hound = "3.5"
 moshi = "0.5.2"
+ringbuf = "0.3"
 rubato = "0.15.0"
 sentencepiece = "0.11.2"
 serde = { version = "1.0.171", features = ["derive"] }
 symphonia = { version = "0.5.3", features = ["all"] }
+thiserror = "1.0"
 toml = "0.8.19"
 tracing = "0.1.40"
 tracing-chrome = "0.7.1"
