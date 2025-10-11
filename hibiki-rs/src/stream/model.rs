@@ -258,10 +258,15 @@ pub fn run_model_thread(
                 match model.process_frame(&frame) {
                     Ok((audio, text)) => {
                         if !audio.is_empty() {
-                            tracing::debug!("🔊 Model generated {} audio samples", audio.len());
-                            let _ = audio_tx.send(audio);
+                            tracing::info!("🔊 Model generated {} audio samples", audio.len());
+                            if let Err(e) = audio_tx.try_send(audio) {
+                                tracing::error!("❌ Failed to send audio to buffer: {:?}", e);
+                            }
+                        } else {
+                            tracing::warn!("⚠️ Model generated EMPTY audio for frame {}", frames_received);
                         }
                         if let Some(text) = text {
+                            tracing::info!("📝 Text: {}", text);
                             let _ = text_tx.send(text);
                         }
                     }

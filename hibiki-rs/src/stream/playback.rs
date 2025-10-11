@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use super::resampler::TARGET_SAMPLE_RATE;
 
-const RING_BUFFER_SIZE: usize = TARGET_SAMPLE_RATE * 8; // 8 seconds at 24kHz (192k samples) - large buffer prevents overflow AND underrun
-const PAUSE_THRESHOLD: usize = TARGET_SAMPLE_RATE / 1000; // 0.1s = 2400 samples - pause when buffer critically low
+const RING_BUFFER_SIZE: usize = TARGET_SAMPLE_RATE * 12; // 12 seconds - needed for slower 2B model
+const PAUSE_THRESHOLD: usize = TARGET_SAMPLE_RATE / 100; // 0.1s = 2400 samples - pause when buffer critically low
 const RESUME_THRESHOLD: usize = TARGET_SAMPLE_RATE / 10; // 0.25s = 6000 samples - resume when buffer refilled (MUST BE > PAUSE!)
-const INITIAL_FILL_THRESHOLD: usize = TARGET_SAMPLE_RATE / 100; // 0.125s = 3000 samples - low latency startup
+const INITIAL_FILL_THRESHOLD: usize = TARGET_SAMPLE_RATE / 10; // 0.5s = 12000 samples - wait longer for 2B to generate
 
 struct PlaybackBuffer {
     buffer: Vec<f32>,
@@ -140,18 +140,8 @@ impl SpeakerSink {
                         
                         let frames = data.len() / channels;
                         
-                        // CRITICAL: Minimize mutex lock time - only query state, copy data out immediately
-                        let (buffer_len, to_read) = {
-                            let mut buf = buffer_cb.lock().unwrap();
-                            let len = buf.available();
-                            
-                            TEMP_BUF.with(|temp| {
-                                let mut temp = temp.borrow_mut();
-                                buf.read(frames, &mut temp);
-                                (len, temp.len())
-                            })
-                        }; // Lock released here!
-                        
+                        // Check buffer level first WITHOUT draining
+                        let buffer_len = buffer_cb.lock().unwrap().available();
                         let is_playing = playing_cb.load(Ordering::Relaxed);
                         let has_started = started_cb.load(Ordering::Relaxed);
                         
@@ -172,7 +162,7 @@ impl SpeakerSink {
                                         last.set(std::time::Instant::now());
                                     }
                                 });
-                                return;
+                                return;  // Don't drain buffer yet!
                             }
                         }
                         
@@ -188,8 +178,20 @@ impl SpeakerSink {
                             underrun_count_cb.fetch_add(1, Ordering::Relaxed);
                         }
                         
+                        // NOW read from buffer (only if playing)
+                        let to_read = if playing_cb.load(Ordering::Relaxed) {
+                            let mut buf = buffer_cb.lock().unwrap();
+                            TEMP_BUF.with(|temp| {
+                                let mut temp = temp.borrow_mut();
+                                buf.read(frames, &mut temp);
+                                temp.len()
+                            })
+                        } else {
+                            0
+                        };
+                        
                         // Write samples WITHOUT holding any lock
-                        if playing_cb.load(Ordering::Relaxed) && to_read > 0 {
+                        if to_read > 0 {
                             TEMP_BUF.with(|temp| {
                                 let temp = temp.borrow();
                                 
@@ -231,9 +233,13 @@ impl SpeakerSink {
     pub fn push_samples(&mut self, samples: &[f32]) -> Result<()> {
         // No resampling needed - direct write at 24kHz
         let mut buf = self.buffer.lock().unwrap();
+        let before = buf.available();
         if buf.write(samples) {
             self.overflow_count.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("🚨 Buffer OVERFLOW! Dropped samples. Buffer was at {} samples", before);
         }
+        let after = buf.available();
+        tracing::debug!("📥 Pushed {} samples to buffer (level: {} → {})", samples.len(), before, after);
         Ok(())
     }
     
